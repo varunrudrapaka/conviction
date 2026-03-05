@@ -236,12 +236,18 @@ export default function PlayPage() {
     if (pubLeagues) setPublicLeagues(pubLeagues);
   };
 
-  const signInWithGoogle = async () => {
-    await supabase.auth.signInWithOAuth({
-      provider: "google",
-      options: { redirectTo: `https://conviction-eta.vercel.app/auth/callback` }
-    });
-  };
+const signInWithGoogle = async () => {
+  await supabase.auth.signInWithOAuth({
+    provider: "google",
+    options: { 
+      redirectTo: `https://conviction-eta.vercel.app/play`,
+      queryParams: {
+        access_type: 'offline',
+        prompt: 'consent',
+      }
+    }
+  });
+};
 
   const signOut = async () => {
     await supabase.auth.signOut();
