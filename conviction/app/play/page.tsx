@@ -239,7 +239,7 @@ export default function PlayPage() {
   const signInWithGoogle = async () => {
     await supabase.auth.signInWithOAuth({
       provider: "google",
-      options: { redirectTo: `${window.location.origin}/play` }
+      options: { redirectTo: `https://conviction-eta.vercel.app/play` }
     });
   };
 
