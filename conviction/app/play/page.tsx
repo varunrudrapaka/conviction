@@ -41,7 +41,6 @@ const sectorColors: Record<string, string> = {
 };
 
 function MiniChart({ change }: { change: number }) {
-  const up = change >= 0;
   const points = Array.from({ length: 8 }, (_, i) => {
     const noise = (Math.random() - 0.5) * 2;
     return 20 - (change * i * 0.4 + noise);
@@ -51,7 +50,7 @@ function MiniChart({ change }: { change: number }) {
   const pts = points.map((v, i) => `${i * 11},${((v - min) / range) * 24}`).join(" ");
   return (
     <svg width="77" height="28" viewBox="0 0 77 28" style={{ display: "block" }}>
-      <polyline points={pts} fill="none" stroke={up ? "#34d399" : "#f87171"} strokeWidth="1.5" strokeLinejoin="round" />
+      <polyline points={pts} fill="none" stroke={change >= 0 ? "#34d399" : "#f87171"} strokeWidth="1.5" strokeLinejoin="round" />
     </svg>
   );
 }
@@ -74,7 +73,6 @@ function ConvictionDots({ value, onChange }: { value: number; onChange: (v: numb
 
 function Countdown({ targetDate }: { targetDate: string }) {
   const [timeLeft, setTimeLeft] = useState({ days: 0, hours: 0, minutes: 0, seconds: 0 });
-
   useEffect(() => {
     const calc = () => {
       const diff = new Date(targetDate).getTime() - Date.now();
@@ -108,6 +106,14 @@ function Countdown({ targetDate }: { targetDate: string }) {
 export default function PlayPage() {
   const [user, setUser] = useState<any>(null);
   const [loading, setLoading] = useState(true);
+  const [authMode, setAuthMode] = useState<"login" | "signup">("login");
+  const [authEmail, setAuthEmail] = useState("");
+  const [authPassword, setAuthPassword] = useState("");
+  const [authName, setAuthName] = useState("");
+  const [authError, setAuthError] = useState("");
+  const [authLoading, setAuthLoading] = useState(false);
+  const [authSuccess, setAuthSuccess] = useState("");
+
   const [screen, setScreen] = useState("leagues");
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [myLeagues, setMyLeagues] = useState<any[]>([]);
@@ -127,14 +133,11 @@ export default function PlayPage() {
   const [draftTime, setDraftTime] = useState("");
   const [now, setNow] = useState(Date.now());
 
-  // Draft state
   const [draftPool, setDraftPool] = useState([...STOCKS]);
   const [myDrafted, setMyDrafted] = useState<typeof STOCKS>([]);
   const [oppDrafted, setOppDrafted] = useState<typeof STOCKS>([]);
   const [draftRound, setDraftRound] = useState(1);
   const [searchQuery, setSearchQuery] = useState("");
-
-  // Lineup state
   const [lineup, setLineup] = useState<Record<string, typeof STOCKS[0]>>({});
   const [convictions, setConvictions] = useState<Record<string, number>>({ anchor: 1, swing1: 1, swing2: 1, moonshot: 3, hedge: 1 });
   const [activeSlot, setActiveSlot] = useState<string | null>(null);
@@ -150,104 +153,86 @@ export default function PlayPage() {
     if (!stock) return 0;
     const slot = SLOT_CONFIG.find(s => s.id === slotId);
     if (!slot) return 0;
-    const conv = convictions[slotId] || 1;
-    return Math.round(stock.change * slot.mult * conv * 100);
+    return Math.round(stock.change * slot.mult * (convictions[slotId] || 1) * 100);
   };
 
   const totalScore = SLOT_CONFIG.reduce((sum, s) => sum + Math.max(0, calcScore(s.id)), 0);
 
-  // Tick every second for countdown
   useEffect(() => {
     const interval = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(interval);
   }, []);
 
   const fetchLeagueDetails = useCallback(async (leagueId: string) => {
-    const { data: members } = await supabase
-      .from("league_members")
-      .select("*, profiles(*)")
-      .eq("league_id", leagueId);
+    const { data: members } = await supabase.from("league_members").select("*, profiles(*)").eq("league_id", leagueId);
     if (members) setLeagueMembers(members);
-
-    const { data: ready } = await supabase
-      .from("draft_ready")
-      .select("*, profiles(*)")
-      .eq("league_id", leagueId);
+    const { data: ready } = await supabase.from("draft_ready").select("*, profiles(*)").eq("league_id", leagueId);
     if (ready) setReadyMembers(ready);
+  }, []);
+
+  const fetchLeagues = useCallback(async (userId: string) => {
+    const { data: memberLeagues } = await supabase.from("league_members").select("league_id, leagues(*)").eq("user_id", userId);
+    if (memberLeagues) setMyLeagues(memberLeagues.map((m: any) => m.leagues).filter(Boolean));
+    const { data: pubLeagues } = await supabase.from("leagues").select("*").eq("is_public", true).limit(10);
+    if (pubLeagues) setPublicLeagues(pubLeagues);
   }, []);
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
       setUser(session?.user ?? null);
       setLoading(false);
-      if (session?.user) {
-        upsertProfile(session.user);
-        fetchLeagues(session.user.id);
-      }
+      if (session?.user) fetchLeagues(session.user.id);
     });
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
       setUser(session?.user ?? null);
-      if (session?.user) {
-        upsertProfile(session.user);
-        fetchLeagues(session.user.id);
-      }
+      if (session?.user) fetchLeagues(session.user.id);
     });
     return () => subscription.unsubscribe();
-  }, []);
+  }, [fetchLeagues]);
 
   useEffect(() => {
-    if (activeLeague) {
-      fetchLeagueDetails(activeLeague.id);
-
-      // Realtime subscription for ready status
-      const channel = supabase
-        .channel(`league-${activeLeague.id}`)
-        .on("postgres_changes", { event: "*", schema: "public", table: "draft_ready", filter: `league_id=eq.${activeLeague.id}` },
-          () => fetchLeagueDetails(activeLeague.id))
-        .on("postgres_changes", { event: "*", schema: "public", table: "leagues", filter: `id=eq.${activeLeague.id}` },
-          async () => {
-            const { data } = await supabase.from("leagues").select("*").eq("id", activeLeague.id).single();
-            if (data) setActiveLeague(data);
-          })
-        .subscribe();
-
-      return () => { supabase.removeChannel(channel); };
-    }
+    if (!activeLeague) return;
+    fetchLeagueDetails(activeLeague.id);
+    const channel = supabase.channel(`league-${activeLeague.id}`)
+      .on("postgres_changes", { event: "*", schema: "public", table: "draft_ready", filter: `league_id=eq.${activeLeague.id}` }, () => fetchLeagueDetails(activeLeague.id))
+      .on("postgres_changes", { event: "*", schema: "public", table: "leagues", filter: `id=eq.${activeLeague.id}` }, async () => {
+        const { data } = await supabase.from("leagues").select("*").eq("id", activeLeague.id).single();
+        if (data) setActiveLeague(data);
+      })
+      .subscribe();
+    return () => { supabase.removeChannel(channel); };
   }, [activeLeague?.id, fetchLeagueDetails]);
 
-  const upsertProfile = async (user: any) => {
-    await supabase.from("profiles").upsert({
-      id: user.id,
-      email: user.email,
-      full_name: user.user_metadata?.full_name,
-      avatar_url: user.user_metadata?.avatar_url,
+  const signUp = async () => {
+    if (!authEmail || !authPassword || !authName) { setAuthError("Please fill in all fields"); return; }
+    if (authPassword.length < 6) { setAuthError("Password must be at least 6 characters"); return; }
+    setAuthLoading(true);
+    setAuthError("");
+    const { data, error } = await supabase.auth.signUp({
+      email: authEmail,
+      password: authPassword,
+      options: { data: { full_name: authName } }
     });
-  };
-
-  const fetchLeagues = async (userId: string) => {
-    const { data: memberLeagues } = await supabase
-      .from("league_members")
-      .select("league_id, leagues(*)")
-      .eq("user_id", userId);
-    if (memberLeagues) setMyLeagues(memberLeagues.map((m: any) => m.leagues).filter(Boolean));
-
-    const { data: pubLeagues } = await supabase
-      .from("leagues").select("*").eq("is_public", true).limit(10);
-    if (pubLeagues) setPublicLeagues(pubLeagues);
-  };
-
-const signInWithGoogle = async () => {
-  await supabase.auth.signInWithOAuth({
-    provider: "google",
-    options: { 
-      redirectTo: `https://conviction-eta.vercel.app/play`,
-      queryParams: {
-        access_type: 'offline',
-        prompt: 'consent',
-      }
+    if (error) { setAuthError(error.message); setAuthLoading(false); return; }
+    if (data.user) {
+      await supabase.from("profiles").upsert({
+        id: data.user.id,
+        email: authEmail,
+        full_name: authName,
+      });
+      setAuthSuccess("Account created! You can now play.");
     }
-  });
-};
+    setAuthLoading(false);
+  };
+
+  const signIn = async () => {
+    if (!authEmail || !authPassword) { setAuthError("Please fill in all fields"); return; }
+    setAuthLoading(true);
+    setAuthError("");
+    const { error } = await supabase.auth.signInWithPassword({ email: authEmail, password: authPassword });
+    if (error) { setAuthError("Invalid email or password"); }
+    setAuthLoading(false);
+  };
 
   const signOut = async () => {
     await supabase.auth.signOut();
@@ -262,10 +247,7 @@ const signInWithGoogle = async () => {
   const createLeague = async () => {
     if (!leagueName.trim()) { setLeagueError("Enter a league name"); return; }
     const { data, error } = await supabase.from("leagues").insert({
-      name: leagueName,
-      invite_code: generateInviteCode(),
-      is_public: isPublic,
-      created_by: user.id,
+      name: leagueName, invite_code: generateInviteCode(), is_public: isPublic, created_by: user.id,
     }).select().single();
     if (error) { setLeagueError("Something went wrong"); return; }
     await supabase.from("league_members").insert({ league_id: data.id, user_id: user.id });
@@ -289,8 +271,7 @@ const signInWithGoogle = async () => {
       league = data;
     }
     if (!league) return;
-    const { error } = await supabase.from("league_members").insert({ league_id: league.id, user_id: user.id });
-    if (error && error.code !== "23505") { setLeagueError("Could not join league"); return; }
+    await supabase.from("league_members").insert({ league_id: league.id, user_id: user.id });
     setMyLeagues(prev => [...prev.filter(l => l.id !== league.id), league]);
     setActiveLeague(league);
     setShowJoinLeague(false);
@@ -302,16 +283,8 @@ const signInWithGoogle = async () => {
   const scheduleDraft = async () => {
     if (!draftDate || !draftTime) return;
     const fullDate = new Date(`${draftDate}T${draftTime}`).toISOString();
-    const { data, error } = await supabase
-      .from("leagues")
-      .update({ draft_date: fullDate })
-      .eq("id", activeLeague.id)
-      .select()
-      .single();
-    if (!error && data) {
-      setActiveLeague(data);
-      setMyLeagues(prev => prev.map(l => l.id === data.id ? data : l));
-    }
+    const { data, error } = await supabase.from("leagues").update({ draft_date: fullDate }).eq("id", activeLeague.id).select().single();
+    if (!error && data) { setActiveLeague(data); setMyLeagues(prev => prev.map(l => l.id === data.id ? data : l)); }
     setShowScheduleDraft(false);
   };
 
@@ -347,12 +320,10 @@ const signInWithGoogle = async () => {
 
   const assignToSlot = (stock: typeof STOCKS[0], slotId: string) => {
     setLineup(prev => {
-      const newLineup = { ...prev };
-      Object.keys(newLineup).forEach(k => {
-        if (newLineup[k]?.ticker === stock.ticker) delete newLineup[k];
-      });
-      newLineup[slotId] = stock;
-      return newLineup;
+      const n = { ...prev };
+      Object.keys(n).forEach(k => { if (n[k]?.ticker === stock.ticker) delete n[k]; });
+      n[slotId] = stock;
+      return n;
     });
     setActiveSlot(null);
   };
@@ -391,8 +362,7 @@ const signInWithGoogle = async () => {
     .btn-gold:hover { background: #fbbf24; }
     .btn-ghost { background: transparent; color: #64748b; padding: 10px 20px; border: 1px solid #1e2433; border-radius: 8px; font-size: 11px; font-family: 'JetBrains Mono', monospace; cursor: pointer; transition: all 0.2s; }
     .btn-ghost:hover { border-color: #3d4a5c; color: #94a3b8; }
-    .btn-green { background: #34d399; color: #080c14; border: none; padding: 12px 24px; border-radius: 8px; font-family: 'JetBrains Mono', monospace; font-weight: 600; font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; cursor: pointer; transition: background 0.2s; }
-    .btn-green:hover { background: #6ee7b7; }
+    .btn-green { background: #34d399; color: #080c14; border: none; padding: 12px 24px; border-radius: 8px; font-family: 'JetBrains Mono', monospace; font-weight: 600; font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; cursor: pointer; }
     .card { background: #0d1117; border: 1px solid #1e2433; border-radius: 12px; padding: 20px; margin-bottom: 16px; }
     .stock-row { display: flex; align-items: center; padding: 12px 16px; border-bottom: 1px solid #0d1117; cursor: pointer; transition: background 0.15s; gap: 12px; }
     .stock-row:hover { background: #0d1421; }
@@ -422,11 +392,9 @@ const signInWithGoogle = async () => {
     .avatar { width: 32px; height: 32px; border-radius: 50%; background: #1e2433; display: flex; align-items: center; justify-content: center; font-size: 12px; color: #64748b; overflow: hidden; flex-shrink: 0; }
     .ready-badge { padding: 3px 10px; border-radius: 20px; font-size: 9px; letter-spacing: 0.1em; font-weight: 600; }
     .error-text { font-size: 11px; color: #f87171; margin-bottom: 12px; }
-    .draft-waiting { text-align: center; padding: 60px 24px; }
-    @media (max-width: 768px) {
-      .sidebar { position: fixed; left: 0; top: 0; bottom: 0; z-index: 50; }
-      .sidebar.closed { width: 0; }
-    }
+    .success-text { font-size: 11px; color: #34d399; margin-bottom: 12px; }
+    .auth-tab { padding: 8px 20px; border-radius: 7px; font-size: 11px; cursor: pointer; border: none; background: transparent; color: #3d4a5c; font-family: 'JetBrains Mono', monospace; transition: all 0.2s; letter-spacing: 0.05em; }
+    .auth-tab.active { background: #f59e0b; color: #080c14; font-weight: 600; }
   `;
 
   if (loading) return (
@@ -439,43 +407,48 @@ const signInWithGoogle = async () => {
   if (!user) return (
     <div style={{ minHeight: "100vh", background: "#080c14", display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "'JetBrains Mono', monospace" }}>
       <style>{styles}</style>
-      <div style={{ maxWidth: 400, width: "100%", padding: 40, textAlign: "center" }}>
-        <div style={{ fontFamily: "'Syne', sans-serif", fontSize: 48, fontWeight: 800, lineHeight: 1, marginBottom: 8 }}>
-          CONVIC<span style={{ color: "#f59e0b" }}>TION</span>
+      <div style={{ maxWidth: 400, width: "100%", padding: 40 }}>
+        <div style={{ textAlign: "center", marginBottom: 40 }}>
+          <div style={{ fontFamily: "'Syne', sans-serif", fontSize: 48, fontWeight: 800, lineHeight: 1, marginBottom: 8 }}>
+            CONVIC<span style={{ color: "#f59e0b" }}>TION</span>
+          </div>
+          <div style={{ fontSize: 12, color: "#3d4a5c", lineHeight: 1.7 }}>Fantasy stock leagues where your thesis is on the line.</div>
         </div>
-        <div style={{ fontSize: 12, color: "#3d4a5c", marginBottom: 48, lineHeight: 1.7 }}>Fantasy stock leagues where your thesis is on the line.</div>
-        <button onClick={signInWithGoogle} style={{
-          width: "100%", padding: "14px 24px", background: "#fff", color: "#080c14",
-          border: "none", borderRadius: 8, fontFamily: "'JetBrains Mono', monospace",
-          fontWeight: 600, fontSize: 13, cursor: "pointer", display: "flex",
-          alignItems: "center", justifyContent: "center", gap: 12,
-        }}>
-          <svg width="18" height="18" viewBox="0 0 18 18">
-            <path fill="#4285F4" d="M16.51 8H8.98v3h4.3c-.18 1-.74 1.48-1.6 2.04v2.01h2.6a7.8 7.8 0 0 0 2.38-5.88c0-.57-.05-.66-.15-1.18z"/>
-            <path fill="#34A853" d="M8.98 17c2.16 0 3.97-.72 5.3-1.94l-2.6-2a4.8 4.8 0 0 1-7.18-2.54H1.83v2.07A8 8 0 0 0 8.98 17z"/>
-            <path fill="#FBBC05" d="M4.5 10.52a4.8 4.8 0 0 1 0-3.04V5.41H1.83a8 8 0 0 0 0 7.18l2.67-2.07z"/>
-            <path fill="#EA4335" d="M8.98 4.18c1.17 0 2.23.4 3.06 1.2l2.3-2.3A8 8 0 0 0 1.83 5.4L4.5 7.49a4.77 4.77 0 0 1 4.48-3.3z"/>
-          </svg>
-          Continue with Google
+
+        <div style={{ display: "flex", gap: 4, background: "#0d1117", padding: 4, borderRadius: 10, border: "1px solid #1e2433", marginBottom: 24 }}>
+          <button className={`auth-tab ${authMode === "login" ? "active" : ""}`} style={{ flex: 1 }} onClick={() => { setAuthMode("login"); setAuthError(""); setAuthSuccess(""); }}>Log In</button>
+          <button className={`auth-tab ${authMode === "signup" ? "active" : ""}`} style={{ flex: 1 }} onClick={() => { setAuthMode("signup"); setAuthError(""); setAuthSuccess(""); }}>Sign Up</button>
+        </div>
+
+        {authError && <div className="error-text">{authError}</div>}
+        {authSuccess && <div className="success-text">{authSuccess}</div>}
+
+        {authMode === "signup" && (
+          <input className="input" placeholder="Your name" value={authName} onChange={e => setAuthName(e.target.value)} />
+        )}
+        <input className="input" type="email" placeholder="Email" value={authEmail} onChange={e => setAuthEmail(e.target.value)} />
+        <input className="input" type="password" placeholder="Password" value={authPassword} onChange={e => setAuthPassword(e.target.value)}
+          onKeyDown={e => e.key === "Enter" && (authMode === "login" ? signIn() : signUp())} />
+
+        <button className="btn-gold" style={{ width: "100%" }} onClick={authMode === "login" ? signIn : signUp} disabled={authLoading}>
+          {authLoading ? "..." : authMode === "login" ? "Log In" : "Create Account"}
         </button>
-        <div style={{ fontSize: 10, color: "#1e2433", marginTop: 20 }}>Free to play · No financial risk</div>
+
+        <div style={{ fontSize: 10, color: "#1e2433", marginTop: 20, textAlign: "center" }}>Free to play · No financial risk</div>
       </div>
     </div>
   );
 
   const userName = user.user_metadata?.full_name || user.email?.split("@")[0] || "Player";
-  const userAvatar = user.user_metadata?.avatar_url;
 
   return (
     <div className="app">
       <style>{styles}</style>
 
-      {/* SIDEBAR */}
       <div className={`sidebar ${sidebarOpen ? "" : "closed"}`}>
         <div className="sidebar-header">
           <div className="sidebar-logo">CONVIC<span>TION</span></div>
         </div>
-
         <div className="sidebar-section" style={{ flex: 1 }}>
           <div className="sidebar-section-title">Your Leagues</div>
           {myLeagues.length === 0 && <div style={{ fontSize: 11, color: "#2a3550", padding: "8px 0" }}>No leagues yet</div>}
@@ -489,7 +462,6 @@ const signInWithGoogle = async () => {
           <button className="sidebar-btn" onClick={() => setShowCreateLeague(true)}>+ Create League</button>
           <button className="sidebar-btn" onClick={() => setShowJoinLeague(true)}>+ Join with Code</button>
         </div>
-
         <div className="sidebar-section" style={{ maxHeight: 200, overflowY: "auto" }}>
           <div className="sidebar-section-title">Public Leagues</div>
           {publicLeagues.length === 0 && <div style={{ fontSize: 11, color: "#2a3550", padding: "8px 0" }}>None yet</div>}
@@ -500,11 +472,8 @@ const signInWithGoogle = async () => {
             </div>
           ))}
         </div>
-
         <div style={{ padding: "12px 16px", borderTop: "1px solid #1e2433", display: "flex", alignItems: "center", gap: 10, flexShrink: 0 }}>
-          <div className="avatar">
-            {userAvatar ? <img src={userAvatar} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : userName[0].toUpperCase()}
-          </div>
+          <div className="avatar">{userName[0]?.toUpperCase()}</div>
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ fontSize: 12, color: "#94a3b8", fontFamily: "'Syne', sans-serif", fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{userName}</div>
           </div>
@@ -512,20 +481,15 @@ const signInWithGoogle = async () => {
         </div>
       </div>
 
-      {/* MAIN */}
       <div className="main">
         <div className="topbar">
           <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
             <button style={{ background: "none", border: "none", color: "#3d4a5c", cursor: "pointer", fontSize: 18, padding: 4 }} onClick={() => setSidebarOpen(!sidebarOpen)}>☰</button>
-            <span style={{ fontFamily: "'Syne', sans-serif", fontWeight: 700, fontSize: 14, color: "#64748b" }}>
-              {activeLeague ? activeLeague.name : "Select a League"}
-            </span>
+            <span style={{ fontFamily: "'Syne', sans-serif", fontWeight: 700, fontSize: 14, color: "#64748b" }}>{activeLeague ? activeLeague.name : "Select a League"}</span>
           </div>
           {activeLeague && (
-            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              <div style={{ fontSize: 10, color: "#3d4a5c", padding: "6px 10px", background: "#080c14", border: "1px solid #1e2433", borderRadius: 6 }}>
-                Code: <span style={{ color: "#f59e0b", fontFamily: "'Syne', sans-serif", fontWeight: 700 }}>{activeLeague.invite_code}</span>
-              </div>
+            <div style={{ fontSize: 10, color: "#3d4a5c", padding: "6px 10px", background: "#080c14", border: "1px solid #1e2433", borderRadius: 6 }}>
+              Code: <span style={{ color: "#f59e0b", fontFamily: "'Syne', sans-serif", fontWeight: 700 }}>{activeLeague.invite_code}</span>
             </div>
           )}
         </div>
@@ -535,9 +499,7 @@ const signInWithGoogle = async () => {
             <div style={{ maxWidth: 480, margin: "80px auto", textAlign: "center" }}>
               <div style={{ fontSize: 56, marginBottom: 20 }}>🏆</div>
               <h2 style={{ fontFamily: "'Syne', sans-serif", fontSize: 28, fontWeight: 800, marginBottom: 12 }}>Join or Create a League</h2>
-              <p style={{ fontSize: 12, color: "#3d4a5c", lineHeight: 1.7, marginBottom: 32 }}>
-                Create a private league and invite your friends, or join a public league to compete with strangers.
-              </p>
+              <p style={{ fontSize: 12, color: "#3d4a5c", lineHeight: 1.7, marginBottom: 32 }}>Create a private league and invite your friends, or join a public league to compete with strangers.</p>
               <div style={{ display: "flex", gap: 12, justifyContent: "center" }}>
                 <button className="btn-gold" onClick={() => setShowCreateLeague(true)}>Create League</button>
                 <button className="btn-ghost" onClick={() => setShowJoinLeague(true)}>Join with Code</button>
@@ -545,36 +507,28 @@ const signInWithGoogle = async () => {
             </div>
           ) : (
             <>
-              {/* TABS */}
               <div className="nav-tabs">
                 {[["lobby", "🏠 Lobby"], ["draft", "📋 Draft"], ["lineup", "💼 Lineup"], ["matchup", "⚔️ Matchup"]].map(([id, label]) => (
                   <button key={id} className={`nav-tab ${screen === id ? "active" : ""}`} onClick={() => setScreen(id)}>{label}</button>
                 ))}
               </div>
 
-              {/* LOBBY */}
               {screen === "lobby" && (
                 <div style={{ maxWidth: 600 }}>
                   <div style={{ marginBottom: 24 }}>
                     <h2 style={{ fontFamily: "'Syne', sans-serif", fontSize: 24, fontWeight: 800, marginBottom: 4 }}>{activeLeague.name}</h2>
                     <div style={{ fontSize: 11, color: "#3d4a5c" }}>
-                      {activeLeague.is_public ? "Public League" : "Private League"} · Invite code: <span style={{ color: "#f59e0b" }}>{activeLeague.invite_code}</span>
+                      {activeLeague.is_public ? "Public" : "Private"} · Invite code: <span style={{ color: "#f59e0b" }}>{activeLeague.invite_code}</span>
                     </div>
                   </div>
 
-                  {/* Draft Schedule Card */}
                   <div className="card">
                     <div style={{ fontSize: 10, letterSpacing: "0.2em", color: "#3d4a5c", textTransform: "uppercase", marginBottom: 16 }}>Draft Schedule</div>
-
                     {!activeLeague.draft_date ? (
                       <div>
                         <div style={{ fontSize: 12, color: "#3d4a5c", marginBottom: 16 }}>No draft scheduled yet.</div>
-                        {isOwner && (
-                          <button className="btn-gold" onClick={() => setShowScheduleDraft(true)}>Schedule Draft</button>
-                        )}
-                        {!isOwner && (
-                          <div style={{ fontSize: 11, color: "#2a3550" }}>Waiting for the league owner to schedule the draft...</div>
-                        )}
+                        {isOwner && <button className="btn-gold" onClick={() => setShowScheduleDraft(true)}>Schedule Draft</button>}
+                        {!isOwner && <div style={{ fontSize: 11, color: "#2a3550" }}>Waiting for the league owner to schedule the draft...</div>}
                       </div>
                     ) : (
                       <div>
@@ -584,51 +538,34 @@ const signInWithGoogle = async () => {
                         <div style={{ fontSize: 20, fontFamily: "'Syne', sans-serif", fontWeight: 700, color: "#e2e8f0", marginBottom: 16 }}>
                           {new Date(activeLeague.draft_date).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" })}
                         </div>
-
-                        {!draftIsPast ? (
+                        {draftDateObj && draftDateObj.getTime() > now ? (
                           <>
                             <div style={{ fontSize: 10, color: "#3d4a5c", letterSpacing: "0.15em", textTransform: "uppercase", marginBottom: 4 }}>Starts in</div>
                             <Countdown targetDate={activeLeague.draft_date} />
                           </>
                         ) : (
-                          <div style={{ padding: "12px 16px", background: "#34d39918", border: "1px solid #34d39933", borderRadius: 8, fontSize: 12, color: "#34d399", marginBottom: 16 }}>
-                            ✓ Draft time has arrived!
-                          </div>
+                          <div style={{ padding: "12px 16px", background: "#34d39918", border: "1px solid #34d39933", borderRadius: 8, fontSize: 12, color: "#34d399", marginBottom: 16 }}>✓ Draft time has arrived!</div>
                         )}
-
-                        {isOwner && (
-                          <button className="btn-ghost" style={{ fontSize: 10, padding: "8px 14px", marginTop: 8 }} onClick={() => setShowScheduleDraft(true)}>
-                            Reschedule
-                          </button>
-                        )}
+                        {isOwner && <button className="btn-ghost" style={{ fontSize: 10, padding: "8px 14px", marginTop: 8 }} onClick={() => setShowScheduleDraft(true)}>Reschedule</button>}
                       </div>
                     )}
                   </div>
 
-                  {/* Members + Ready */}
                   <div className="card">
                     <div style={{ fontSize: 10, letterSpacing: "0.2em", color: "#3d4a5c", textTransform: "uppercase", marginBottom: 16 }}>
-                      League Members ({leagueMembers.length}) · {readyMembers.length} Ready
+                      Members ({leagueMembers.length}) · {readyMembers.length} Ready
                     </div>
-
                     {leagueMembers.map(member => {
                       const profile = member.profiles;
-                      const memberReady = readyMembers.find(r => r.user_id === member.user_id);
-                      const isYou = member.user_id === user.id;
+                      const memberReady = readyMembers.find((r: any) => r.user_id === member.user_id);
                       return (
                         <div key={member.id} className="member-row">
-                          <div className="avatar">
-                            {profile?.avatar_url
-                              ? <img src={profile.avatar_url} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
-                              : (profile?.full_name || "?")[0].toUpperCase()}
-                          </div>
+                          <div className="avatar">{(profile?.full_name || profile?.email || "?")[0].toUpperCase()}</div>
                           <div style={{ flex: 1 }}>
                             <div style={{ fontSize: 12, color: "#94a3b8", fontFamily: "'Syne', sans-serif", fontWeight: 600 }}>
-                              {profile?.full_name || profile?.email || "Member"} {isYou && <span style={{ fontSize: 9, color: "#f59e0b" }}>YOU</span>}
+                              {profile?.full_name || profile?.email || "Member"} {member.user_id === user.id && <span style={{ fontSize: 9, color: "#f59e0b" }}>YOU</span>}
                             </div>
-                            {activeLeague.created_by === member.user_id && (
-                              <div style={{ fontSize: 9, color: "#3d4a5c" }}>League Owner</div>
-                            )}
+                            {activeLeague.created_by === member.user_id && <div style={{ fontSize: 9, color: "#3d4a5c" }}>League Owner</div>}
                           </div>
                           <div className="ready-badge" style={{ background: memberReady ? "#34d39918" : "#1e2433", color: memberReady ? "#34d399" : "#3d4a5c" }}>
                             {memberReady ? "✓ Ready" : "Not Ready"}
@@ -636,35 +573,29 @@ const signInWithGoogle = async () => {
                         </div>
                       );
                     })}
-
                     <div style={{ marginTop: 20, display: "flex", gap: 10, flexWrap: "wrap" as const }}>
                       {draftIsPast && (
                         <button className={isReady ? "btn-ghost" : "btn-green"} onClick={markReady}>
-                          {isReady ? "✓ Ready (click to undo)" : "Mark as Ready"}
+                          {isReady ? "✓ Ready (undo)" : "Mark as Ready"}
                         </button>
                       )}
-                      {isOwner && draftIsPast && allReady && (
-                        <button className="btn-gold" onClick={startDraft}>Start Draft Now →</button>
+                      {isOwner && (allReady || leagueMembers.length === 1) && (
+                        <button className="btn-gold" onClick={startDraft}>Start Draft →</button>
                       )}
-                      {isOwner && draftIsPast && !allReady && leagueMembers.length > 1 && (
-                        <button className="btn-gold" onClick={startDraft}>Start Draft Anyway →</button>
-                      )}
-                      {isOwner && draftIsPast && leagueMembers.length === 1 && (
-                        <button className="btn-gold" onClick={startDraft}>Start Solo Draft →</button>
+                      {isOwner && !allReady && leagueMembers.length > 1 && (
+                        <button className="btn-ghost" onClick={startDraft}>Start Anyway →</button>
                       )}
                     </div>
                   </div>
                 </div>
               )}
 
-              {/* DRAFT */}
               {screen === "draft" && (
                 <div style={{ maxWidth: 700 }}>
                   <div style={{ marginBottom: 20 }}>
                     <h2 style={{ fontFamily: "'Syne', sans-serif", fontSize: 24, fontWeight: 800, marginBottom: 4 }}>Live Draft</h2>
-                    <div style={{ fontSize: 11, color: "#3d4a5c" }}>Round {draftRound} of 5 · Pick {myDrafted.length}/5 stocks</div>
+                    <div style={{ fontSize: 11, color: "#3d4a5c" }}>Round {draftRound} · Pick {myDrafted.length}/5</div>
                   </div>
-
                   <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 20 }}>
                     {[["You", myDrafted], ["Opponent", oppDrafted]].map(([name, drafted]: any) => (
                       <div key={name as string} className="card" style={{ padding: 14 }}>
@@ -675,8 +606,8 @@ const signInWithGoogle = async () => {
                               padding: "4px 8px", borderRadius: 4,
                               background: drafted[i] ? (name === "You" ? "#f59e0b22" : "#1e2433") : "#080c14",
                               border: `1px solid ${drafted[i] ? (name === "You" ? "#f59e0b44" : "#2a3550") : "#1e2433"}`,
-                              fontSize: 11, color: drafted[i] ? (name === "You" ? "#f59e0b" : "#64748b") : "#1e2433", fontWeight: 700,
-                              fontFamily: "'Syne', sans-serif"
+                              fontSize: 11, color: drafted[i] ? (name === "You" ? "#f59e0b" : "#64748b") : "#1e2433",
+                              fontWeight: 700, fontFamily: "'Syne', sans-serif"
                             }}>
                               {drafted[i]?.ticker || "—"}
                             </div>
@@ -685,10 +616,7 @@ const signInWithGoogle = async () => {
                       </div>
                     ))}
                   </div>
-
-                  <input className="input" placeholder="Search stocks..." value={searchQuery}
-                    onChange={e => setSearchQuery(e.target.value)} style={{ marginBottom: 0 }} />
-
+                  <input className="input" placeholder="Search stocks..." value={searchQuery} onChange={e => setSearchQuery(e.target.value)} style={{ marginBottom: 0 }} />
                   <div className="card" style={{ padding: 0, overflow: "hidden", marginTop: 12 }}>
                     {filteredPool.map(stock => {
                       const drafted = myDrafted.find(s => s.ticker === stock.ticker);
@@ -699,45 +627,37 @@ const signInWithGoogle = async () => {
                           <div style={{ flex: 1 }}>
                             <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 3 }}>
                               <span style={{ fontFamily: "'Syne', sans-serif", fontWeight: 800, fontSize: 14, color: sectorColors[stock.sector] || "#64748b", width: 52 }}>{stock.ticker}</span>
-                              <span className="pill" style={{ background: `${sectorColors[stock.sector]}18`, color: sectorColors[stock.sector] || "#64748b" }}>{stock.sector}</span>
+                              <span className="pill" style={{ background: `${sectorColors[stock.sector]}18`, color: sectorColors[stock.sector] }}>{stock.sector}</span>
                               <span className="pill" style={{ background: stock.vol === "High" ? "#f8717118" : stock.vol === "Low" ? "#34d39918" : "#f59e0b18", color: stock.vol === "High" ? "#f87171" : stock.vol === "Low" ? "#34d399" : "#f59e0b" }}>{stock.vol}</span>
                             </div>
                             <div style={{ fontSize: 10, color: "#3d4a5c" }}>{stock.name}</div>
                           </div>
                           <div style={{ textAlign: "right" as const }}>
                             <MiniChart change={stock.change} />
-                            <div style={{ fontSize: 12, color: stock.change >= 0 ? "#34d399" : "#f87171", fontWeight: 500 }}>
-                              {stock.change >= 0 ? "+" : ""}{stock.change}%
-                            </div>
+                            <div style={{ fontSize: 12, color: stock.change >= 0 ? "#34d399" : "#f87171", fontWeight: 500 }}>{stock.change >= 0 ? "+" : ""}{stock.change}%</div>
                           </div>
                         </div>
                       );
                     })}
                   </div>
-
                   {myDrafted.length === 5 && (
-                    <button className="btn-gold" style={{ width: "100%", marginTop: 16 }} onClick={() => setScreen("lineup")}>
-                      Draft Complete → Set Lineup
-                    </button>
+                    <button className="btn-gold" style={{ width: "100%", marginTop: 16 }} onClick={() => setScreen("lineup")}>Draft Complete → Set Lineup</button>
                   )}
                 </div>
               )}
 
-              {/* LINEUP */}
               {screen === "lineup" && (
                 <div style={{ maxWidth: 600 }}>
                   <div style={{ marginBottom: 20 }}>
                     <h2 style={{ fontFamily: "'Syne', sans-serif", fontSize: 24, fontWeight: 800, marginBottom: 4 }}>Set Lineup</h2>
-                    <div style={{ fontSize: 11, color: "#3d4a5c" }}>Assign picks to slots · Set your conviction multiplier</div>
+                    <div style={{ fontSize: 11, color: "#3d4a5c" }}>Assign picks to slots · Set your conviction</div>
                   </div>
-
                   {myDrafted.length === 0 && (
                     <div className="card" style={{ textAlign: "center", padding: 32 }}>
-                      <div style={{ fontSize: 11, color: "#3d4a5c", marginBottom: 16 }}>You haven&apos;t drafted any stocks yet</div>
+                      <div style={{ fontSize: 11, color: "#3d4a5c", marginBottom: 16 }}>No stocks drafted yet</div>
                       <button className="btn-ghost" onClick={() => setScreen("draft")}>← Go to Draft</button>
                     </div>
                   )}
-
                   {SLOT_CONFIG.map(slot => {
                     const stock = lineup[slot.id];
                     const isActive = activeSlot === slot.id;
@@ -746,25 +666,23 @@ const signInWithGoogle = async () => {
                       <div key={slot.id} className={`slot-card ${stock ? "filled" : ""} ${isActive ? "active-slot" : ""}`}
                         onClick={() => !stock && setActiveSlot(isActive ? null : slot.id)}>
                         <div style={{ display: "flex", alignItems: "flex-start", gap: 12 }}>
-                          <span style={{ fontSize: 22, lineHeight: 1 }}>{slot.icon}</span>
+                          <span style={{ fontSize: 22 }}>{slot.icon}</span>
                           <div style={{ flex: 1 }}>
                             <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
                               <span style={{ fontFamily: "'Syne', sans-serif", fontWeight: 700, fontSize: 13, color: slot.color }}>{slot.label}</span>
-                              <span style={{ fontSize: 9, color: "#2a3550" }}>{slot.mult}x multiplier</span>
+                              <span style={{ fontSize: 9, color: "#2a3550" }}>{slot.mult}x</span>
                             </div>
                             {!stock && <div style={{ fontSize: 10, color: "#2a3550" }}>{slot.desc}</div>}
                             {stock && (
                               <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                                 <span style={{ fontFamily: "'Syne', sans-serif", fontWeight: 800, fontSize: 16, color: slot.color }}>{stock.ticker}</span>
                                 <span style={{ fontSize: 11, color: stock.change >= 0 ? "#34d399" : "#f87171" }}>{stock.change >= 0 ? "+" : ""}{stock.change}%</span>
-                                <span style={{ marginLeft: "auto", fontFamily: "'Syne', sans-serif", fontWeight: 700, fontSize: 14, color: score >= 0 ? "#34d399" : "#f87171" }}>
-                                  {score >= 0 ? "+" : ""}{score} pts
-                                </span>
+                                <span style={{ marginLeft: "auto", fontFamily: "'Syne', sans-serif", fontWeight: 700, fontSize: 14, color: score >= 0 ? "#34d399" : "#f87171" }}>{score >= 0 ? "+" : ""}{score} pts</span>
                               </div>
                             )}
                           </div>
                           {stock && (
-                            <button onClick={(e) => { e.stopPropagation(); setLineup(prev => { const n = { ...prev }; delete n[slot.id]; return n; }); }}
+                            <button onClick={e => { e.stopPropagation(); setLineup(prev => { const n = { ...prev }; delete n[slot.id]; return n; }); }}
                               style={{ background: "none", border: "none", color: "#2a3550", cursor: "pointer", fontSize: 18 }}>×</button>
                           )}
                         </div>
@@ -772,45 +690,37 @@ const signInWithGoogle = async () => {
                           <div onClick={e => e.stopPropagation()} style={{ marginTop: 14 }}>
                             <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
                               <span style={{ fontSize: 10, color: "#3d4a5c" }}>Conviction:</span>
-                              <ConvictionDots value={convictions[slot.id] || 1} onChange={(v) => setConvictions(prev => ({ ...prev, [slot.id]: v }))} />
+                              <ConvictionDots value={convictions[slot.id] || 1} onChange={v => setConvictions(prev => ({ ...prev, [slot.id]: v }))} />
                             </div>
                           </div>
                         )}
                         {isActive && !stock && (
                           <div style={{ marginTop: 12, borderTop: "1px solid #1e2433", paddingTop: 12 }}>
                             {myDrafted.filter(s => !Object.values(lineup).find(l => l?.ticker === s.ticker)).map(s => (
-                              <div key={s.ticker} onClick={(e) => { e.stopPropagation(); assignToSlot(s, slot.id); }}
+                              <div key={s.ticker} onClick={e => { e.stopPropagation(); assignToSlot(s, slot.id); }}
                                 style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 0", cursor: "pointer", borderBottom: "1px solid #080c14" }}>
                                 <span style={{ fontFamily: "'Syne', sans-serif", fontWeight: 800, fontSize: 14, color: sectorColors[s.sector] || "#64748b", width: 52 }}>{s.ticker}</span>
                                 <span style={{ flex: 1, fontSize: 11, color: "#3d4a5c" }}>{s.name}</span>
                                 <span style={{ fontSize: 12, color: s.change >= 0 ? "#34d399" : "#f87171" }}>{s.change >= 0 ? "+" : ""}{s.change}%</span>
                               </div>
                             ))}
-                            {myDrafted.filter(s => !Object.values(lineup).find(l => l?.ticker === s.ticker)).length === 0 && (
-                              <div style={{ fontSize: 11, color: "#2a3550", textAlign: "center", padding: "8px 0" }}>All picks assigned</div>
-                            )}
                           </div>
                         )}
                       </div>
                     );
                   })}
-
                   {Object.keys(lineup).length === 5 && (
-                    <button className="btn-gold" style={{ width: "100%", marginTop: 8 }} onClick={() => setScreen("matchup")}>
-                      Lock Lineup → View Matchup
-                    </button>
+                    <button className="btn-gold" style={{ width: "100%", marginTop: 8 }} onClick={() => setScreen("matchup")}>Lock Lineup → View Matchup</button>
                   )}
                 </div>
               )}
 
-              {/* MATCHUP */}
               {screen === "matchup" && (
                 <div style={{ maxWidth: 600 }}>
                   <div style={{ marginBottom: 20 }}>
                     <h2 style={{ fontFamily: "'Syne', sans-serif", fontSize: 24, fontWeight: 800, marginBottom: 4 }}>Live Matchup</h2>
                     <div style={{ fontSize: 11, color: "#3d4a5c" }}>Week 1 · {activeLeague?.name}</div>
                   </div>
-
                   <div className="card" style={{ textAlign: "center", marginBottom: 20 }}>
                     <div style={{ display: "grid", gridTemplateColumns: "1fr auto 1fr", alignItems: "center", gap: 16, marginBottom: 16 }}>
                       <div>
@@ -830,8 +740,6 @@ const signInWithGoogle = async () => {
                       {totalScore > 1890 ? `▲ Leading by ${totalScore - 1890} pts` : `▼ Trailing by ${1890 - totalScore} pts`}
                     </div>
                   </div>
-
-                  <div style={{ fontSize: 10, letterSpacing: "0.2em", color: "#3d4a5c", textTransform: "uppercase", marginBottom: 12 }}>Head to Head</div>
                   {SLOT_CONFIG.map((slot, i) => {
                     const myStock = lineup[slot.id];
                     const oppStocks = [{ ticker: "AMZN", change: 0.9 }, { ticker: "MSFT", change: 1.1 }, { ticker: "AAPL", change: 0.6 }, { ticker: "RIVN", change: -3.4 }, { ticker: "JNJ", change: 0.2 }];
@@ -859,7 +767,6 @@ const signInWithGoogle = async () => {
         </div>
       </div>
 
-      {/* CREATE LEAGUE MODAL */}
       {showCreateLeague && (
         <div className="modal-overlay" onClick={() => { setShowCreateLeague(false); setLeagueError(""); }}>
           <div className="modal" onClick={e => e.stopPropagation()}>
@@ -881,15 +788,12 @@ const signInWithGoogle = async () => {
         </div>
       )}
 
-      {/* JOIN LEAGUE MODAL */}
       {showJoinLeague && (
         <div className="modal-overlay" onClick={() => { setShowJoinLeague(false); setLeagueError(""); }}>
           <div className="modal" onClick={e => e.stopPropagation()}>
             <div className="modal-title">Join League</div>
             {leagueError && <div className="error-text">{leagueError}</div>}
-            <div style={{ fontSize: 11, color: "#3d4a5c", marginBottom: 16 }}>Enter the invite code from your friend</div>
-            <input className="input" placeholder="INVITE CODE" value={joinCode}
-              onChange={e => setJoinCode(e.target.value.toUpperCase())}
+            <input className="input" placeholder="INVITE CODE" value={joinCode} onChange={e => setJoinCode(e.target.value.toUpperCase())}
               style={{ textTransform: "uppercase", letterSpacing: "0.2em", fontSize: 20, fontFamily: "'Syne', sans-serif", fontWeight: 800, textAlign: "center" }} />
             <div style={{ display: "flex", gap: 10 }}>
               <button className="btn-gold" style={{ flex: 1 }} onClick={() => joinLeague(undefined, joinCode)}>Join</button>
@@ -899,17 +803,13 @@ const signInWithGoogle = async () => {
         </div>
       )}
 
-      {/* SCHEDULE DRAFT MODAL */}
       {showScheduleDraft && (
         <div className="modal-overlay" onClick={() => setShowScheduleDraft(false)}>
           <div className="modal" onClick={e => e.stopPropagation()}>
             <div className="modal-title">Schedule Draft</div>
-            <div style={{ fontSize: 11, color: "#3d4a5c", marginBottom: 16 }}>
-              Set the date and time for your league draft. All members will see a live countdown.
-            </div>
+            <div style={{ fontSize: 11, color: "#3d4a5c", marginBottom: 16 }}>Set the date and time. All members will see a live countdown.</div>
             <div style={{ fontSize: 10, color: "#3d4a5c", marginBottom: 6, letterSpacing: "0.1em", textTransform: "uppercase" }}>Date</div>
-            <input className="input" type="date" value={draftDate} onChange={e => setDraftDate(e.target.value)}
-              min={new Date().toISOString().split("T")[0]} />
+            <input className="input" type="date" value={draftDate} onChange={e => setDraftDate(e.target.value)} min={new Date().toISOString().split("T")[0]} />
             <div style={{ fontSize: 10, color: "#3d4a5c", marginBottom: 6, letterSpacing: "0.1em", textTransform: "uppercase" }}>Time</div>
             <input className="input" type="time" value={draftTime} onChange={e => setDraftTime(e.target.value)} />
             <div style={{ display: "flex", gap: 10, marginTop: 4 }}>
