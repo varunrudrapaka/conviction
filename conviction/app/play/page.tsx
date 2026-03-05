@@ -213,14 +213,22 @@ export default function PlayPage() {
       password: authPassword,
       options: { data: { full_name: authName } }
     });
-    if (error) { setAuthError(error.message); setAuthLoading(false); return; }
+    if (error) {
+      if (error.message.toLowerCase().includes("already registered") || error.message.toLowerCase().includes("already exists")) {
+        setAuthError("Account already exists — log in instead!");
+        setAuthMode("login");
+      } else {
+        setAuthError(error.message);
+      }
+      setAuthLoading(false);
+      return;
+    }
     if (data.user) {
       await supabase.from("profiles").upsert({
         id: data.user.id,
         email: authEmail,
         full_name: authName,
       });
-      setAuthSuccess("Account created! You can now play.");
     }
     setAuthLoading(false);
   };
