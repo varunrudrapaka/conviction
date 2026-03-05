@@ -15,8 +15,3 @@ export async function GET(request: Request) {
 
   return NextResponse.redirect(`https://conviction-eta.vercel.app/play`)
 }
-```
-
-Save, then go to Supabase **Authentication → URL Configuration** and change the redirect URL to:
-```
-https://conviction-eta.vercel.app/auth/callback
